@@ -1,0 +1,402 @@
+#Housekeeping
+library("imputation")
+setwd("c:/DDM/Hw3")
+load('heart_failure_readmissions.RData')
+
+#Get the features and class together
+pdata=cbind(data$features,readm=data$y)
+
+#Remove the rows with no sex information
+pdata=pdata[!is.na(pdata$sex),]
+
+#Remove the rows with no congestive heart failure information
+pdata=pdata[!is.na(pdata$congestive_heart_failure),]
+
+#cleanup the rows that have high height values, are in centimeters instead of inches
+pdata[!is.na(pdata$height_in) & as.numeric(pdata$height_in)>80,]$height_in=as.numeric(pdata[!is.na(pdata$height_in) & as.numeric(pdata$height_in)>80,]$height_in)*12/30
+
+#Round of the values that have higher precision
+pdata$height_in=as.numeric(pdata$height_in)
+
+#Convert the possible feet into inches
+pdata[!is.na(pdata$height_in) & as.numeric(pdata$height_in)<7,]$height_in=as.numeric(pdata[!is.na(pdata$height_in) & as.numeric(pdata$height_in)<7,]$height_in)*12
+
+#Round of the values that have higher precision
+pdata$weight_kg=as.numeric(pdata$weight_kg)
+
+#Filter out the values that have weight greater than 125kg. While these may have been in pounds, I am not keen on converting
+pdata=pdata[is.na(pdata$weight_kg) | (!is.na(pdata$weight_kg) & pdata$weight_kg<125),]
+
+#Calculate the height in metres
+pdata$height_in=(pdata$height_in*2.54)/100
+
+#Round the height to second decimal
+pdata$height_in=round(pdata$height_in,2)
+
+#Get rid of the outlier height values
+pdata=pdata[is.na(pdata$height_in) | (!is.na(pdata$height_in) & pdata$height_in>1.5),]
+
+#Calculate the BMI index
+pdata=cbind(pdata,bmi=(pdata$weight_kg/(pdata$height_in*pdata$height_in)))
+
+#Filter out the values that have bmi>40
+pdata=pdata[is.na(pdata$bmi) | (!is.na(pdata$bmi) & pdata$bmi<35),]
+
+
+#Impute values using GBM
+impdata=cbind(pdata[,c(1,2,5:35)],gbmImpute(pdata[,c(3,4,36)],max.iters=3,cv.fold=2,n.trees=100))
+
+#Impute values using SVD
+impdata=cbind(pdata[,c(1,2,5:35)],SVDImpute(pdata[,c(3,4,36)],3, num.iters = 10))
+
+#Get rid of additional columns added by SVD
+impdata=impdata[,c(1:36)]
+
+#Plot the imputed values of the height
+plot((hist(impdata$x.height_in,plot=FALSE))$mids,(hist(impdata$x.height_in,plot=FALSE))$count,xlab="Height",ylab="Frequency")
+lines((hist(impdata$x.height_in,plot=FALSE))$mids,(hist(impdata$x.height_in,plot=FALSE))$count)
+
+#Plot the imputed values of the weight
+plot((hist(impdata$x.weight_kg,plot=FALSE))$mids,(hist(impdata$x.weight_kg,plot=FALSE))$count,xlab="Weight",ylab="Frequency")
+lines((hist(impdata$x.weight_kg,plot=FALSE))$mids,(hist(impdata$x.weight_kg,plot=FALSE))$count)
+
+#Set up the training and test sample for the model
+sample_size=floor(0.8*nrow(impdata))
+set.seed(123)
+train_ind=sample(seq_len(nrow(impdata)), size = sample_size)
+train=impdata[train_ind, ]
+test=impdata[-train_ind, ]
+
+#model
+m=glm(readm~sex+age+x.height_in+x.weight_kg+x.bmi+congestive_heart_failure+cardiac_arrhythmias+valvular_disease+pulmonary_circulation+peripheral_vascular+hypertension+paralysis+other_neurological+chronic_pulmonary+diabetes_uncomplicated+diabetes_complicated+hypothyroidism+renal_failure+liver_disease+peptic_ulcer+aids+lymphoma+metastatic_cancer+solid_tumor+rheumatoid_arthritis+psychoses+depression+coagulopathy+obesity+weight_loss+fluid_electrolyte+deficiency_anemias+alcohol_abuse+drug_abuse, family= binomial(link = "logit"),data=train)
+#prediction
+out=predict(m,test[,c(1:32,34:36)],type="response")
+
+#alternate model decision tree
+library("rpart")
+m=rpart(as.numeric(train[,33])~.,train[,c(1:32,34:36)],control=rpart.control(cp=0.0001))
+out=predict(m,test[,c(1:32,34:36)])
+out=out-1
+
+
+#Set up for the ROC plot
+pseq=seq(from=0.000, to=1.000, by=0.001)
+iterator=1
+roc_table=data.frame(prob=rep(0.000, 1000),tpr=rep(0.00, 1000),fpr=rep(0.00, 1000))
+while(iterator<=1001)
+{
+	temp=out
+	temp[temp>=pseq[iterator]]=1
+	temp[temp<pseq[iterator]]=0
+	
+	cont=table(temp,test[,33])
+	if(dim(cont)[1]>1)
+	{
+		tpr=cont[2,2]/(cont[1,2]+cont[2,2])
+		fpr=cont[2,1]/(cont[1,1]+cont[2,1])
+	}
+	
+	else
+	{
+		if(unique(temp)==1)
+		{
+			tpr=1
+			fpr=1
+		}
+		else
+		{
+			tpr=0
+			fpr=0
+		}
+		
+	}
+		roc_table[iterator,]=c(pseq[iterator],tpr,fpr)
+	iterator=iterator+1
+}
+plot(roc_table[,3],roc_table[,2],xlab="FPR",ylab="TPR")
+lines(roc_table[,3],roc_table[,2])
+#Area under ROC
+trapezoid <- function(x,y) sum(diff(x)*(y[-1]+y[-length(y)]))/2 
+trapezoid(1-roc_table[,3],roc_table[,2])
+
+
+#odds ratios
+cont=table(pdata$readm,pdata$congestive_heart_failure)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Heart Failure")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(pdata$readm,pdata$diabetes_uncomplicated)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Diabetes")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(pdata$readm,pdata$fluid_electrolyte)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Fluid")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(pdata$readm,pdata$sex)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Sex")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+#Read the data 
+comorb=read.csv("comorbidities.csv")
+comorb$pcuis = array(comorb$pcuis)
+
+#Logic for the overlapping histograms
+pos=as.data.frame(comorb[grep("C0003873",comorb[,]$pcuis),3])
+neg=as.data.frame(comorb[grep("C0003873",comorb[,]$pcuis,invert="true"),3])
+pos$ind="Positive"
+neg$ind="Negative"
+attributes(pos)$names[1]="age"
+attributes(neg)$names[1]="age"
+
+univ=rbind(pos,neg)
+ggplot(univ, aes(age, fill = ind)) + geom_histogram(alpha = 1, aes(y = ..density..), position = 'stack')
+modmorb=comorb
+
+#Logic to add comorbid disease indicator columns to the data
+new_ind=data.frame(mycard_ind=rep(NA, 113060))
+new_ind[grep("C0027051",comorb[,]$pcuis),1]=1
+new_ind[grep("C0027051",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(comorb[,1:3],mi_ind=new_ind)
+
+new_ind=data.frame(heartfail_ind=rep(NA, 113060))
+new_ind[grep("C0018801",comorb[,]$pcuis),1]=1
+new_ind[grep("C0018801",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:4],new_ind)
+
+new_ind=data.frame(pvd_ind=rep(NA, 113060))
+new_ind[grep("C0085096",comorb[,]$pcuis),1]=1
+new_ind[grep("C0085096",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:5],new_ind)
+
+new_ind=data.frame(depression_ind=rep(NA, 113060))
+new_ind[grep("C0344315",comorb[,]$pcuis),1]=1
+new_ind[grep("C0344315",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:6],new_ind)
+
+new_ind=data.frame(ra_ind=rep(NA, 113060))
+new_ind[grep("C0003873",comorb[,]$pcuis),1]=1
+new_ind[grep("C0003873",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:7],new_ind)
+
+new_ind=data.frame(fracture_ind=rep(NA, 113060))
+new_ind[grep("C0016658",comorb[,]$pcuis),1]=1
+new_ind[grep("C0016658",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:8],new_ind)
+
+new_ind=data.frame(diabetes_ind=rep(NA, 113060))
+new_ind[grep("C0011849",comorb[,]$pcuis),1]=1
+new_ind[grep("C0011849",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:9],new_ind)
+
+new_ind=data.frame(ulcer_ind=rep(NA, 113060))
+new_ind[grep("C0041582",comorb[,]$pcuis),1]=1
+new_ind[grep("C0041582",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:10],new_ind)
+
+new_ind=data.frame(ost_ind=rep(NA, 113060))
+new_ind[grep("C0029456",comorb[,]$pcuis),1]=1
+new_ind[grep("C0029456",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:11],new_ind)
+
+new_ind=data.frame(infection_ind=rep(NA, 113060))
+new_ind[grep("C0021311",comorb[,]$pcuis),1]=1
+new_ind[grep("C0021311",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:12],new_ind)
+
+new_ind=data.frame(anemia_ind=rep(NA, 113060))
+new_ind[grep("C0002871",comorb[,]$pcuis),1]=1
+new_ind[grep("C0002871",comorb[,]$pcuis,invert="true"),1]=0
+modmorb=cbind(modmorb[,1:13],new_ind)
+
+
+#Logic for the absolute frequencies, odd ratios and relative risk values
+cont=table(modmorb$ra_ind,modmorb$pvd_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("PVD")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$mycard_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Mycard")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$depression_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Depression")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$heartfail_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("HeartFail")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$fracture_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Fracture")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$diabetes_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Diabetes")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$ulcer_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Ulcer")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$ost_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("OST")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$infection_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Infection")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+cont=table(modmorb$ra_ind,modmorb$anemia_ind)
+pos_prob=cont[2,2]/sum(cont[1,2],cont[2,2])
+neg_prob=cont[2,1]/sum(cont[1,1],cont[2,1])
+print("Anemia")
+(pos_prob/(1-pos_prob))/(neg_prob/(1-neg_prob))
+pos_prob/neg_prob
+
+#Get the demographic related attributes
+dem=read.csv("comorbidities_demographics.csv",header=TRUE_
+attributes(dem)$names[1]="patient_id"
+modmorb=merge(modmorb,dem,by="patient_id")
+
+#Set up the training and test data
+sample_size=floor(0.8*nrow(modmorb))
+set.seed(123)
+train_ind=sample(seq_len(nrow(modmorb)), size = sample_size)
+train=modmorb[train_ind, ]
+test=modmorb[-train_ind, ]
+
+#Logistic Regression Model
+#m=glm(ra_ind~diabetes_ind+ulcer_ind+ost_ind+anemia_ind, family= binomial(link = "logit"),data=train)
+
+m=glm(ra_ind~age+gender+race+ethnicity+diabetes_ind+ulcer_ind+ost_ind+anemia_ind, family= binomial(link = "logit"),data=train)
+
+#Decision Tree classification
+m=rpart(ra_ind~diabetes_ind+ulcer_ind+ost_ind+anemia_ind, data=train)
+out=predict(m,test[,c(3,10,11,12,14)],type="response")
+
+#AUC
+pseq=seq(from=0.000, to=1.000, by=0.001)
+iterator=1
+roc_table=data.frame(prob=rep(0.000, 1000),tpr=rep(0.00, 1000),fpr=rep(0.00, 1000))
+while(iterator<=1001)
+{
+	temp=out
+	temp[temp>=pseq[iterator]]=1
+	temp[temp<pseq[iterator]]=0
+	
+	cont=table(temp,test[,8])
+	if(dim(cont)[1]>1)
+	{
+		tpr=cont[2,2]/(cont[1,2]+cont[2,2])
+		fpr=cont[2,1]/(cont[1,1]+cont[2,1])
+	}
+	
+	else
+	{
+		if(unique(temp)==1)
+		{
+			tpr=1
+			fpr=1
+		}
+		else
+		{
+			tpr=0
+			fpr=0
+		}
+		
+	}
+		roc_table[iterator,]=c(pseq[iterator],tpr,fpr)
+	iterator=iterator+1
+}
+
+plot(roc_table[,3],roc_table[,2],xlab="FPR",ylab="TPR")
+lines(roc_table[,3],roc_table[,2])
+
+trapezoid <- function(x,y) sum(diff(x)*(y[-1]+y[-length(y)]))/2 
+trapezoid(1-roc_table[,3],roc_table[,2])
+
+
+library("rpart")
+m=rpart(train[,8]~.,train[,c(3,10,11,12,14,15,16,17)],control=rpart.control(cp=0.001))
+out=predict(m,test[,c(3,10,11,12,14,15,16,17)])
+pseq=seq(from=0.000, to=1.000, by=0.001)
+
+iterator=1
+roc_table=data.frame(prob=rep(0.000, 1000),tpr=rep(0.00, 1000),fpr=rep(0.00, 1000))
+
+while(iterator<=1001)
+{
+	temp=out
+	temp[temp>=pseq[iterator]]=1
+	temp[temp<pseq[iterator]]=0
+	
+	cont=table(temp,test[,8])
+	if(dim(cont)[1]>1)
+	{
+		tpr=cont[2,2]/(cont[1,2]+cont[2,2])
+		fpr=cont[2,1]/(cont[1,1]+cont[2,1])
+	}
+	
+	else
+	{
+		if(unique(temp)==1)
+		{
+			tpr=1
+			fpr=1
+		}
+		else
+		{
+			tpr=0
+			fpr=0
+		}
+		
+	}
+		roc_table[iterator,]=c(pseq[iterator],tpr,fpr)
+	iterator=iterator+1
+}
+
+plot(roc_table[,3],roc_table[,2],xlab="FPR",ylab="TPR")
+lines(roc_table[,3],roc_table[,2])
+
+trapezoid <- function(x,y) sum(diff(x)*(y[-1]+y[-length(y)]))/2 
+trapezoid(1-roc_table[,3],roc_table[,2])
